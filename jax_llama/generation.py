@@ -1,11 +1,11 @@
 import jax
 import jax.numpy as jnp
-from jax_llama import FlaxLLaMAForCausalLM
-from jax_llama.llama2_tokenizer import Tokenizer as LLaMA2Tokenizer
-from jax_llama.llama3_tokenizer import Tokenizer as LLaMA3Tokenizer
+from .model import FlaxLLaMAForCausalLM
+from .llama2_tokenizer import Tokenizer as LLaMA2Tokenizer
+from .llama3_tokenizer import Tokenizer as LLaMA3Tokenizer
 from transformers.generation import GenerationConfig
 from jax.sharding import Mesh
-from jax_llama.partition import with_named_sharding_constraint
+from .partition import with_named_sharding_constraint
 from jax.sharding import PartitionSpec as P
 from jaxtyping import PyTree
 from flax import struct
@@ -18,8 +18,10 @@ class LLaMA(struct.PyTreeNode):
     tokenizer: Union[LLaMA2Tokenizer, LLaMA3Tokenizer] = struct.field(pytree_node=False)
     mesh: Optional[Mesh] = struct.field(pytree_node=False, default=None)
 
-    @partial(jax.jit, static_argnums=(3,4,5))
+    # @partial(jax.jit, static_argnums=(3,4,5))
     def generate(self, tokens: jnp.ndarray, attention_mask: jnp.ndarray, max_gen_len: int, temperature: float = 0.8, top_p: float = 0.95) -> jnp.ndarray:
+        print('generate tokens')
+        print(tokens)
         tokens = with_named_sharding_constraint(tokens, self.mesh, P("dp", None))
         attention_mask = with_named_sharding_constraint(attention_mask, self.mesh, P("dp", None))
 
@@ -43,16 +45,25 @@ class LLaMA(struct.PyTreeNode):
         return out_tokens
     
     def generate_from_str(self, prompts: List[str], max_gen_len: int, temperature: float = 0.8, top_p: float = 0.95):
+        print('calling generate_from_str with')
+        print(prompts)
         prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
+        print(prompt_tokens)
 
         max_prompt_size = max([len(t) for t in prompt_tokens])
 
         tokens = jnp.full((len(prompts), max_prompt_size), self.tokenizer.eos_id).astype(jnp.int32)
         for i, t in enumerate(prompt_tokens):
             tokens = tokens.at[i, -len(t):].set(t) # left pad
+        print('padded tokens')
+        print(tokens)
         attention_mask = (tokens != self.tokenizer.eos_id).astype(jnp.int32)
+        print('attention mask')
+        print(attention_mask)
 
         out_tokens = self.generate(tokens, attention_mask, max_gen_len, temperature, top_p)
+        print('output tokens')
+        print(out_tokens)
 
         decoded = []
         for i, t in enumerate(out_tokens.tolist()):

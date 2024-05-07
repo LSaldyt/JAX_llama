@@ -1,6 +1,8 @@
 from functools import partial
 from typing import Optional, Tuple, Union
 
+from time import sleep
+
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
@@ -16,7 +18,7 @@ from transformers.modeling_flax_outputs import FlaxBaseModelOutput, FlaxCausalLM
 from transformers.modeling_flax_utils import ACT2FN, FlaxPreTrainedModel, append_call_sample_docstring
 from transformers.utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging
 
-from jax_llama.config import LLaMAConfig
+from .config import LLaMAConfig
 import math
 
 remat = nn_partitioning.remat
@@ -59,17 +61,29 @@ def apply_rotary_emb(
     freqs_cis: jnp.ndarray, 
     dtype: jnp.dtype=jnp.float32, 
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    # print('applying rotary embeddings')
     
     reshape_xq = xq.astype(jnp.float32).reshape(*xq.shape[:-1], -1, 2)
     reshape_xk = xk.astype(jnp.float32).reshape(*xk.shape[:-1], -1, 2)
+    # print('reshape')
+    # print(reshape_xq)
     
     xq_ = jax.lax.complex(reshape_xq[..., 0], reshape_xq[..., 1])
     xk_ = jax.lax.complex(reshape_xk[..., 0], reshape_xk[..., 1])
 
+    # print('complex')
+    # print(xq_)
+    # print(xq_.shape)
+
     # add head dim
     freqs_cis = jnp.reshape(freqs_cis, (*freqs_cis.shape[:2], 1, *freqs_cis.shape[2:]))
+    # print('freqs cis head dim')
+    # print(freqs_cis)
+    # print(freqs_cis.shape)
     
     xq_out = xq_ * freqs_cis
+    # print('xq_out')
+    # print(xq_out)
     xq_out = jnp.stack((jnp.real(xq_out), jnp.imag(xq_out)), axis=-1).reshape(*xq_out.shape[:-1], -1)
 
     xk_out = xk_ * freqs_cis
@@ -96,11 +110,11 @@ class FlaxLLaMAAttention(nn.Module):
 
     def setup(self):
         config = self.config
-        self.embed_dim = config.hidden_size
+        self.embed_dim = config.hidden_size # 4096
         self.num_heads = config.num_attention_heads
-        self.head_dim = self.embed_dim // self.num_heads
-        self.num_key_value_heads = config.num_key_value_heads
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.head_dim = self.embed_dim // self.num_heads  # 4096 / 32
+        self.num_key_value_heads = config.num_key_value_heads # 8
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads # 32 / 8
 
         self.wq = nn.Dense(
             config.num_attention_heads*self.head_dim, 
@@ -161,9 +175,9 @@ class FlaxLLaMAAttention(nn.Module):
         """
         # detect if we're initializing by absence of existing cache data.
         is_initialized = self.has_variable("cache", "cached_key")
-        cached_key = self.variable("cache", "cached_key", jnp.zeros, key.shape, key.dtype)
-        cached_value = self.variable("cache", "cached_value", jnp.zeros, value.shape, value.dtype)
-        cache_index = self.variable("cache", "cache_index", lambda: jnp.array(0, dtype=jnp.int32))
+        cached_key     = self.variable("cache", "cached_key",   jnp.zeros, key.shape, key.dtype)
+        cached_value   = self.variable("cache", "cached_value", jnp.zeros, value.shape, value.dtype)
+        cache_index    = self.variable("cache", "cache_index", lambda: jnp.array(0, dtype=jnp.int32))
 
         if is_initialized:
             *batch_dims, max_length, num_heads, depth_per_head = cached_key.value.shape
@@ -195,13 +209,29 @@ class FlaxLLaMAAttention(nn.Module):
     ):
         xq, xk, xv = self.wq(hidden_states), self.wk(hidden_states), self.wv(hidden_states)
 
-        xq = self._split_heads(xq, self.num_heads)
-        xk = self._split_heads(xk, self.num_key_value_heads)
-        xv = self._split_heads(xv, self.num_key_value_heads)
+        xq = self._split_heads(xq, self.num_heads) # 32
+        xk = self._split_heads(xk, self.num_key_value_heads) # 8
+        xv = self._split_heads(xv, self.num_key_value_heads) # 8
+
+        # print('split xq')
+        # print(xq)
+        # print('split xk')
+        # print(xk)
+        # print('split xv')
+        # print(xv)
 
         freqs_cis = jnp.take(self.freqs_cis, position_ids, axis=0)
 
+        # print('freqs_cis')
+        # print(freqs_cis)
+        # print(freqs_cis.shape)
+
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, dtype=self.dtype)
+
+        # print('xq rotary')
+        # print(xq)
+        # print('xk rotary')
+        # print(xk)
 
         query_length, key_length = xq.shape[1], xk.shape[1]
         
@@ -238,6 +268,10 @@ class FlaxLLaMAAttention(nn.Module):
 
         xk = repeat_kv(xk, self.num_key_value_groups)
         xv = repeat_kv(xv, self.num_key_value_groups)
+        # print('keys')
+        # print(xk)
+        # print('values')
+        # print(xv)
 
         # usual dot product attention
         attn_weights = dot_product_attention_weights(
@@ -252,8 +286,14 @@ class FlaxLLaMAAttention(nn.Module):
         )
 
         attn_output = jnp.einsum("...hqk,...khd->...qhd", attn_weights, xv, precision=self.precision)
+        # print('attention out')
+        # print(attn_output)
         attn_output = self._merge_heads(attn_output)
+        # print('merge heads')
+        # print(attn_output)
         attn_output = self.wo(attn_output)
+        # print('result')
+        # print(attn_output)
         attn_output = self.resid_dropout(attn_output, deterministic=deterministic)
         
         outputs = (attn_output, attn_weights) if output_attentions else (attn_output,)
@@ -534,9 +574,12 @@ class FlaxLLaMABlockCollection(nn.Module):
         all_attentions = () if output_attentions else None
         all_hidden_states = () if output_hidden_states else None
 
+        i = 0
+
         for block in self.blocks:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
+
 
             layer_outputs = block(
                 hidden_states, 
@@ -587,9 +630,20 @@ class FlaxLLaMAModule(nn.Module):
         output_hidden_states: bool = False,
         return_dict: bool = True,
     ):
+        # print('input ids')
+        # print(input_ids)
+        # print(input_ids.shape)
+        print('llama flax input tokens')
+        print(input_ids)
         input_embeds = self.wte(input_ids.astype("i4"))
+        # print('input embeddings')
+        # print(input_embeds)
+        # print(input_embeds.shape)
 
         hidden_states = self.dropout(input_embeds, deterministic=deterministic)
+        # print('hidden_states')
+        # print(hidden_states)
+        # print(hidden_states.shape)
 
         outputs = self.h(
             hidden_states,
@@ -601,6 +655,8 @@ class FlaxLLaMAModule(nn.Module):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+        # print('outputs')
+        # print(outputs[1])
 
         hidden_states = outputs[0]
         hidden_states = self.ln_f(hidden_states)

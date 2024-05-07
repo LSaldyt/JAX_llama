@@ -4,9 +4,9 @@ import torch
 import json
 import numpy as np
 from jaxtyping import PyTree
-from jax_llama.config import LLaMAConfig
-from jax_llama.llama2_tokenizer import Tokenizer as LLaMA2Tokenizer
-from jax_llama.llama3_tokenizer import Tokenizer as LLaMA3Tokenizer
+from .config import LLaMAConfig
+from .llama2_tokenizer import Tokenizer as LLaMA2Tokenizer
+from .llama3_tokenizer import Tokenizer as LLaMA3Tokenizer
 from typing import Tuple, Optional
 from dataclasses import dataclass
 
@@ -24,6 +24,13 @@ class ModelArgs:
 
     max_batch_size: int = 32
     max_seq_len: int = 2048
+
+def test_intermediate_size(dim, ffn_dim_multiplier, multiple_of):
+    intermediate_size = int(2 * (dim * 4) / 3)
+    if ffn_dim_multiplier is not None:
+        intermediate_size = int(ffn_dim_multiplier * intermediate_size)
+    intermediate_size = multiple_of * ((intermediate_size + multiple_of - 1) // multiple_of)
+    return intermediate_size
 
 def config_from_params(args: ModelArgs) -> LLaMAConfig:
     intermediate_size = int(2 * (args.dim * 4) / 3)
